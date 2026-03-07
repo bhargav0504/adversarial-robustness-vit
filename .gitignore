@@ -1,0 +1,34 @@
+# Virtual environments
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Downloaded datasets (large, re-downloadable)
+data/datasets/
+
+# Model checkpoints (large binary files)
+checkpoints/
+
+# Results (generated locally)
+results/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

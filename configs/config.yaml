@@ -1,0 +1,43 @@
+data:
+  dataset: cifar10
+  data_dir: ./data/datasets
+  batch_size: 64
+  num_workers: 2
+  image_size: 224
+
+models:
+  vit:
+    arch: deit_small_patch16_224
+    pretrained: true
+    num_classes: 10
+    checkpoint: null
+  resnet:
+    arch: resnet18
+    pretrained: true
+    num_classes: 10
+    checkpoint: null
+
+attacks:
+  fgsm:
+    eps: 0.03
+  pgd:
+    eps: 0.03
+    alpha: 0.007
+    steps: 40
+  patch:
+    patch_size: 32
+    max_iter: 100
+
+training:
+  epochs: 10
+  lr: 0.0001
+  weight_decay: 0.01
+  adv_training_epochs: 5
+  adv_eps: 0.03
+
+evaluation:
+  n_samples: 1000
+
+results_dir: ./results
+checkpoints_dir: ./checkpoints
+device: auto
