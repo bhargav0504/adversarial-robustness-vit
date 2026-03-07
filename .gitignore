@@ -30,5 +30,8 @@ results/
 .DS_Store
 Thumbs.db
 
+# Gradio temp uploads (Windows permission fix)
+.gradio_tmp/
+
 # Logs
 *.log

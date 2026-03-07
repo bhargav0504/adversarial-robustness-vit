@@ -16,8 +16,13 @@ import yaml
 from PIL import Image
 from torchvision import transforms
 
-# Make sure project root is on the path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Fix Gradio permission error on Windows — redirect temp uploads to a local folder
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_GRADIO_TMP   = os.path.join(_PROJECT_ROOT, '.gradio_tmp')
+os.makedirs(_GRADIO_TMP, exist_ok=True)
+os.environ['GRADIO_TEMP_DIR'] = _GRADIO_TMP
+
+sys.path.insert(0, _PROJECT_ROOT)
 
 import gradio as gr
 
