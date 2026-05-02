@@ -4,23 +4,41 @@ import torch.nn as nn
 import torchattacks
 from tqdm import tqdm
 
+from data.loader import CIFAR10_MEAN, CIFAR10_STD
+
+
+class _NormalizedModel(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+        self.register_buffer('mean', torch.tensor(CIFAR10_MEAN).view(1, 3, 1, 1))
+        self.register_buffer('std',  torch.tensor(CIFAR10_STD).view(1, 3, 1, 1))
+
+    def forward(self, x):
+        return self.model((x - self.mean) / self.std)
+
+
+def _denorm(images, device):
+    mean = torch.tensor(CIFAR10_MEAN).view(1, 3, 1, 1).to(device)
+    std  = torch.tensor(CIFAR10_STD).view(1, 3, 1, 1).to(device)
+    return (images * std + mean).clamp(0, 1)
+
+
+def _renorm(images, device):
+    mean = torch.tensor(CIFAR10_MEAN).view(1, 3, 1, 1).to(device)
+    std  = torch.tensor(CIFAR10_STD).view(1, 3, 1, 1).to(device)
+    return (images - mean) / std
+
 
 def adversarial_train(model, train_loader, config, device, save_path=None):
-    """
-    PGD-based adversarial training.
+    epochs  = config['training']['adv_training_epochs']
+    lr      = config['training']['lr']
+    adv_eps = config['training']['adv_eps']
+    wd      = config['training']['weight_decay']
 
-    For each mini-batch the model sees adversarial examples (generated with
-    a fast 7-step PGD) instead of clean images. This is the AT-PGD method
-    from Madry et al. (2018), the standard baseline for certified robustness.
-    """
-    epochs     = config['training']['adv_training_epochs']
-    lr         = config['training']['lr']
-    adv_eps    = config['training']['adv_eps']
-    wd         = config['training']['weight_decay']
-
-    optimizer  = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
-    criterion  = nn.CrossEntropyLoss()
-    scheduler  = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+    criterion = nn.CrossEntropyLoss()
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     history = {'train_loss': [], 'train_acc': []}
 
@@ -28,21 +46,24 @@ def adversarial_train(model, train_loader, config, device, save_path=None):
         model.train()
         total_loss = total_correct = total = 0
 
-        # Build attack fresh each epoch so it picks up any model changes
-        atk = torchattacks.PGD(
-            model, eps=adv_eps, alpha=adv_eps / 4, steps=7
-        )
+        norm_model = _NormalizedModel(model).to(device)
+        atk = torchattacks.PGD(norm_model, eps=adv_eps, alpha=adv_eps / 4, steps=7)
 
         for images, labels in tqdm(train_loader, desc=f"Adv Train {epoch+1}/{epochs}"):
             images, labels = images.to(device), labels.to(device)
 
-            # Generate adversarial images (model set to eval inside torchattacks)
+            images_01 = _denorm(images, device)
+
+            norm_model.eval()
             model.eval()
-            adv_images = atk(images, labels)
+            adv_01 = atk(images_01, labels)
             model.train()
+            norm_model.train()
+
+            adv_norm = _renorm(adv_01, device)
 
             optimizer.zero_grad()
-            outputs = model(adv_images)
+            outputs = model(adv_norm)
             loss    = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
@@ -62,6 +83,6 @@ def adversarial_train(model, train_loader, config, device, save_path=None):
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         torch.save(model.state_dict(), save_path)
-        print(f"Saved adversarially trained model → {save_path}")
+        print(f"Saved adversarially trained model -> {save_path}")
 
     return history

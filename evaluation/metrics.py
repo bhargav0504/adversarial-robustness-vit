@@ -1,13 +1,35 @@
 import torch
+import torch.nn as nn
 from tqdm import tqdm
 
 from attacks.fgsm import get_fgsm_attack
 from attacks.pgd import get_pgd_attack
 from attacks.patch_attack import PatchAttack
+from data.loader import CIFAR10_MEAN, CIFAR10_STD
+
+
+class NormalizedModel(nn.Module):
+    """Wraps model with CIFAR-10 normalization so attacks work in [0, 1]."""
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+        mean = torch.tensor(CIFAR10_MEAN).view(1, 3, 1, 1)
+        std  = torch.tensor(CIFAR10_STD).view(1, 3, 1, 1)
+        self.register_buffer('mean', mean)
+        self.register_buffer('std',  std)
+
+    def forward(self, x):
+        return self.model((x - self.mean) / self.std)
+
+
+def _denorm(images, device):
+    mean = torch.tensor(CIFAR10_MEAN).view(1, 3, 1, 1).to(device)
+    std  = torch.tensor(CIFAR10_STD).view(1, 3, 1, 1).to(device)
+    return (images * std + mean).clamp(0, 1)
 
 
 def compute_accuracy(model, loader, device, desc="Clean accuracy"):
-    """Evaluate clean (unattacked) accuracy."""
     model.eval()
     correct = total = 0
 
@@ -21,17 +43,19 @@ def compute_accuracy(model, loader, device, desc="Clean accuracy"):
     return correct / total
 
 
-def compute_robust_accuracy(model, loader, attack, device, desc="Robust accuracy"):
-    """Evaluate accuracy under a given attack."""
-    model.eval()
+def compute_robust_accuracy(norm_model, raw_model, loader, attack_fn, device, desc="Robust accuracy"):
+    norm_model.eval()
+    raw_model.eval()
     correct = total = 0
+
+    atk = attack_fn(norm_model)
 
     for images, labels in tqdm(loader, desc=desc):
         images, labels = images.to(device), labels.to(device)
-        adv_images = attack(images, labels)
-
+        images_01 = _denorm(images, device)
+        adv_01    = atk(images_01, labels)
         with torch.no_grad():
-            _, predicted = model(adv_images).max(1)
+            _, predicted = norm_model(adv_01).max(1)
             correct += predicted.eq(labels).sum().item()
             total   += images.size(0)
 
@@ -39,38 +63,37 @@ def compute_robust_accuracy(model, loader, attack, device, desc="Robust accuracy
 
 
 def evaluate_model(model, loader, config, device, model_name="Model"):
-    """
-    Run full evaluation: clean accuracy + FGSM + PGD + Patch robustness.
-
-    Returns a dict with keys:
-        model, clean_acc, fgsm_acc, pgd_acc, patch_acc
-    """
     print(f"\n{'='*50}")
     print(f"Evaluating: {model_name}")
     print(f"{'='*50}")
 
+    norm_model = NormalizedModel(model).to(device)
     results = {'model': model_name}
 
     results['clean_acc'] = compute_accuracy(model, loader, device, "  Clean")
 
-    fgsm = get_fgsm_attack(model, config)
+    eps   = config['attacks']['fgsm']['eps']
+    pgd_a = config['attacks']['pgd']['alpha']
+    pgd_s = config['attacks']['pgd']['steps']
+    ps    = config['attacks']['patch']['patch_size']
+    mi    = config['attacks']['patch']['max_iter']
+
     results['fgsm_acc'] = compute_robust_accuracy(
-        model, loader, fgsm, device, "  FGSM"
+        norm_model, model, loader,
+        lambda m: get_fgsm_attack(m, config),
+        device, "  FGSM"
     )
 
-    pgd = get_pgd_attack(model, config)
     results['pgd_acc'] = compute_robust_accuracy(
-        model, loader, pgd, device, "  PGD"
+        norm_model, model, loader,
+        lambda m: get_pgd_attack(m, config),
+        device, "  PGD"
     )
 
-    patch_atk = PatchAttack(
-        model,
-        patch_size=config['attacks']['patch']['patch_size'],
-        max_iter=config['attacks']['patch']['max_iter'],
-        device=device,
-    )
     results['patch_acc'] = compute_robust_accuracy(
-        model, loader, patch_atk, device, "  Patch"
+        norm_model, model, loader,
+        lambda m: PatchAttack(m, patch_size=ps, max_iter=mi, device=device),
+        device, "  Patch"
     )
 
     print(f"\n  Clean: {results['clean_acc']*100:.2f}%  "

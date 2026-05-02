@@ -1,22 +1,14 @@
-"""
-demo/app.py — Interactive Gradio demo for the Adversarial Robustness Framework.
-
-Run from the project root:
-  python demo/app.py
-
-Then open http://localhost:7860 in your browser.
-"""
 import os
 import sys
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torchattacks
 import yaml
 from PIL import Image
 from torchvision import transforms
 
-# Fix Gradio permission error on Windows — redirect temp uploads to a local folder
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _GRADIO_TMP   = os.path.join(_PROJECT_ROOT, '.gradio_tmp')
 os.makedirs(_GRADIO_TMP, exist_ok=True)
@@ -30,121 +22,122 @@ from attacks.patch_attack import PatchAttack
 from data.loader import CIFAR10_CLASSES, CIFAR10_MEAN, CIFAR10_STD
 from models import load_resnet, load_vit
 
-# ── Config & device ──────────────────────────────────────────────────────────
-with open(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'configs', 'config.yaml')) as f:
+with open(os.path.join(_PROJECT_ROOT, 'configs', 'config.yaml')) as f:
     CONFIG = yaml.safe_load(f)
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# ── Preprocessing ─────────────────────────────────────────────────────────────
+# Attacks need [0, 1] inputs so we don't normalize here
 TRANSFORM = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
-    transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD),
 ])
+
+_MEAN = torch.tensor(CIFAR10_MEAN).view(1, 3, 1, 1)
+_STD  = torch.tensor(CIFAR10_STD).view(1, 3, 1, 1)
+
+
+class NormalizedModel(nn.Module):
+    """Wraps model with normalization so attacks can work in [0, 1] space."""
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+        self.register_buffer('mean', _MEAN.clone())
+        self.register_buffer('std',  _STD.clone())
+
+    def forward(self, x):
+        return self.model((x - self.mean) / self.std)
 
 
 def tensor_to_pil(tensor):
-    """Convert a normalised (C,H,W) or (1,C,H,W) tensor to PIL."""
-    mean = torch.tensor(CIFAR10_MEAN).view(3, 1, 1)
-    std  = torch.tensor(CIFAR10_STD).view(3, 1, 1)
-    img  = (tensor.squeeze(0).cpu() * std + mean).clamp(0, 1)
+    img = tensor.squeeze(0).cpu().clamp(0, 1)
     return Image.fromarray((img.permute(1, 2, 0).numpy() * 255).astype(np.uint8))
 
 
 def load_model(model_choice):
     cfg = CONFIG.copy()
     if model_choice == 'ViT (DeiT-Small)':
-        ckpt = './checkpoints/vit_cifar10.pth'
+        ckpt = os.path.join(_PROJECT_ROOT, 'checkpoints', 'vit_cifar10.pth')
         cfg['models']['vit']['checkpoint'] = ckpt if os.path.exists(ckpt) else None
-        return load_vit(cfg, DEVICE)
+        model = load_vit(cfg, DEVICE)
     else:
-        ckpt = './checkpoints/resnet_cifar10.pth'
+        ckpt = os.path.join(_PROJECT_ROOT, 'checkpoints', 'resnet_cifar10.pth')
         cfg['models']['resnet']['checkpoint'] = ckpt if os.path.exists(ckpt) else None
-        return load_resnet(cfg, DEVICE)
+        model = load_resnet(cfg, DEVICE)
+    return NormalizedModel(model).to(DEVICE)
 
 
-# ── Main inference function ───────────────────────────────────────────────────
 def run_attack(pil_image, model_choice, attack_choice, eps):
     if pil_image is None:
         return None, None, "No image provided", "No image provided", "—"
 
-    model = load_model(model_choice)
-    model.eval()
+    norm_model = load_model(model_choice)
+    norm_model.eval()
 
     img_t = TRANSFORM(pil_image.convert('RGB')).unsqueeze(0).to(DEVICE)
 
-    # ── Clean prediction ──────────────────────────────────────────────────────
     with torch.no_grad():
-        logits = model(img_t)
+        logits = norm_model(img_t)
         probs  = torch.softmax(logits, dim=1)[0]
         pred   = probs.argmax().item()
 
     clean_label = f"{CIFAR10_CLASSES[pred]}  ({probs[pred]*100:.1f}%)"
     target      = torch.tensor([pred]).to(DEVICE)
 
-    # ── Generate adversarial example ──────────────────────────────────────────
+    if attack_choice == 'None':
+        orig_pil   = tensor_to_pil(img_t)
+        blank_pert = tensor_to_pil(torch.zeros_like(img_t))
+        return orig_pil, blank_pert, clean_label, clean_label, "No attack applied"
+
     if attack_choice == 'FGSM':
-        atk = torchattacks.FGSM(model, eps=eps)
+        atk   = torchattacks.FGSM(norm_model, eps=eps)
         adv_t = atk(img_t, target)
+
     elif attack_choice == 'PGD':
-        atk = torchattacks.PGD(model, eps=eps, alpha=eps / 4, steps=40)
+        atk   = torchattacks.PGD(norm_model, eps=eps, alpha=eps / 4, steps=40, random_start=True)
         adv_t = atk(img_t, target)
-    else:  # Patch
-        atk   = PatchAttack(model, patch_size=32, max_iter=50, device=DEVICE)
+
+    else:
+        atk   = PatchAttack(norm_model, patch_size=56, max_iter=150, lr=0.05, device=DEVICE)
         adv_t = atk(img_t, target)
 
     adv_pil = tensor_to_pil(adv_t)
 
-    # ── Adversarial prediction ────────────────────────────────────────────────
     with torch.no_grad():
-        adv_logits = model(adv_t)
+        adv_logits = norm_model(adv_t)
         adv_probs  = torch.softmax(adv_logits, dim=1)[0]
         adv_pred   = adv_probs.argmax().item()
 
     adv_label = f"{CIFAR10_CLASSES[adv_pred]}  ({adv_probs[adv_pred]*100:.1f}%)"
 
-    # ── Perturbation visualisation (amplified 10×) ────────────────────────────
     pert     = (adv_t - img_t).abs()
     pert_pil = tensor_to_pil((pert * 10).clamp(0, 1))
 
-    status = "FOOLED ✗" if pred != adv_pred else "Robust ✓  (prediction unchanged)"
+    status = "FOOLED" if pred != adv_pred else "Robust (prediction unchanged)"
 
     return adv_pil, pert_pil, clean_label, adv_label, status
 
 
-# ── Gradio UI ─────────────────────────────────────────────────────────────────
 with gr.Blocks(title="Adversarial Robustness Framework") as demo:
     gr.Markdown(
         "# Adversarial Robustness Framework\n"
-        "**UTA AI Course Project** — Upload any CIFAR-10 style image and see "
-        "how adversarial attacks change the model's prediction.\n\n"
-        "> Note: Run `python train.py` first to fine-tune the models on CIFAR-10. "
-        "Without checkpoints, predictions will be random (untrained head)."
+        "Upload a CIFAR-10 style image and see how adversarial attacks change the model's prediction."
     )
 
     with gr.Row():
         with gr.Column(scale=1):
-            inp_image    = gr.Image(type='pil', label="Input Image")
-            model_choice = gr.Radio(
-                ['ViT (DeiT-Small)', 'ResNet-18'],
-                value='ViT (DeiT-Small)', label="Model"
-            )
-            attack_choice = gr.Radio(
-                ['FGSM', 'PGD', 'Patch'],
-                value='FGSM', label="Attack"
-            )
-            eps_slider = gr.Slider(
-                0.01, 0.3, value=0.03, step=0.01,
-                label="Epsilon  (perturbation strength, ignored for Patch)"
-            )
-            run_btn = gr.Button("Run Attack", variant="primary")
+            inp_image     = gr.Image(type='pil', label="Input Image")
+            model_choice  = gr.Radio(['ViT (DeiT-Small)', 'ResNet-18'], value='ViT (DeiT-Small)', label="Model")
+            attack_choice = gr.Radio(['None', 'FGSM', 'PGD', 'Patch'], value='None', label="Attack")
+            eps_slider    = gr.Slider(0.01, 0.30, value=0.03, step=0.01, label="Epsilon (perturbation strength)")
+            run_btn       = gr.Button("Run", variant="primary")
 
         with gr.Column(scale=1):
-            out_adv   = gr.Image(label="Adversarial Image")
-            out_pert  = gr.Image(label="Perturbation  (amplified 10×)")
-            clean_out = gr.Textbox(label="Clean Prediction")
-            adv_out   = gr.Textbox(label="Adversarial Prediction")
+            out_adv    = gr.Image(label="Adversarial Image")
+            out_pert   = gr.Image(label="Perturbation (amplified 10x)")
+            clean_out  = gr.Textbox(label="Clean Prediction")
+            adv_out    = gr.Textbox(label="Adversarial Prediction")
             status_out = gr.Textbox(label="Result")
 
     run_btn.click(

@@ -1,10 +1,3 @@
-"""
-evaluate.py — Benchmark clean and robust accuracy for all trained models.
-
-Usage:
-  python evaluate.py
-  python evaluate.py --device cpu
-"""
 import argparse
 import json
 import os
@@ -44,7 +37,7 @@ def plot_results(all_results, save_dir):
     path = os.path.join(save_dir, 'robustness_comparison.png')
     plt.savefig(path, dpi=150)
     plt.close()
-    print(f"\nPlot saved → {path}")
+    print(f"\nPlot saved -> {path}")
 
 
 def main(args):
@@ -57,53 +50,38 @@ def main(args):
         device = torch.device(args.device)
     print(f"Device: {device}")
 
-    _, test_loader = get_loaders(
-        config, n_eval_samples=config['evaluation']['n_samples']
-    )
+    _, test_loader = get_loaders(config, n_eval_samples=config['evaluation']['n_samples'])
 
     os.makedirs(config['results_dir'], exist_ok=True)
     all_results = []
 
-    # --- ViT (standard fine-tuned) ---
     config['models']['vit']['checkpoint'] = './checkpoints/vit_cifar10.pth'
     vit = load_vit(config, device)
     all_results.append(evaluate_model(vit, test_loader, config, device, "ViT (Standard)"))
 
-    # --- ViT (adversarially trained) ---
     adv_ckpt = './checkpoints/vit_cifar10_adv.pth'
     if os.path.exists(adv_ckpt):
         config['models']['vit']['checkpoint'] = adv_ckpt
         vit_adv = load_vit(config, device)
-        all_results.append(
-            evaluate_model(vit_adv, test_loader, config, device, "ViT (Adv. Trained)")
-        )
+        all_results.append(evaluate_model(vit_adv, test_loader, config, device, "ViT (Adv. Trained)"))
 
-    # --- ResNet-18 (standard fine-tuned) ---
     config['models']['resnet']['checkpoint'] = './checkpoints/resnet_cifar10.pth'
     resnet = load_resnet(config, device)
-    all_results.append(
-        evaluate_model(resnet, test_loader, config, device, "ResNet18 (Standard)")
-    )
+    all_results.append(evaluate_model(resnet, test_loader, config, device, "ResNet18 (Standard)"))
 
-    # --- ResNet-18 (adversarially trained) ---
     adv_ckpt_r = './checkpoints/resnet_cifar10_adv.pth'
     if os.path.exists(adv_ckpt_r):
         config['models']['resnet']['checkpoint'] = adv_ckpt_r
         resnet_adv = load_resnet(config, device)
-        all_results.append(
-            evaluate_model(resnet_adv, test_loader, config, device, "ResNet18 (Adv. Trained)")
-        )
+        all_results.append(evaluate_model(resnet_adv, test_loader, config, device, "ResNet18 (Adv. Trained)"))
 
-    # Save JSON
     json_path = os.path.join(config['results_dir'], 'results.json')
     with open(json_path, 'w') as f:
         json.dump(all_results, f, indent=2)
-    print(f"Results saved → {json_path}")
+    print(f"Results saved -> {json_path}")
 
-    # Plot
     plot_results(all_results, config['results_dir'])
 
-    # Summary table
     df = pd.DataFrame(all_results)
     for col in ['clean_acc', 'fgsm_acc', 'pgd_acc', 'patch_acc']:
         df[col] = (df[col] * 100).round(2)
